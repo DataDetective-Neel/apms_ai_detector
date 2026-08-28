@@ -2,34 +2,37 @@
 
 import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { Entry } from '@/lib/types/database';
 import { StatusBadge } from '@/components/StatusBadge';
 import { DetectorResultCard } from '@/components/DetectorResultCard';
 import { ExifViewer } from '@/components/ExifViewer';
 import { HumanReviewForm } from '@/components/HumanReviewForm';
 import { DisclaimerBanner } from '@/components/DisclaimerBanner';
+import { DeleteConfirmModal } from '@/components/DeleteConfirmModal';
 import {
   ArrowLeft,
   RefreshCw,
   AlertTriangle,
-  CheckCircle2,
-  XCircle,
-  Hash,
   Fingerprint,
   Layers,
-  FileSearch,
-  ExternalLink,
+  Trash2,
 } from 'lucide-react';
 
 export default function EntryDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const entryId = params.id as string;
 
   const [entry, setEntry] = useState<Entry | null>(null);
   const [loading, setLoading] = useState(true);
   const [reanalyzing, setReanalyzing] = useState(false);
   const [reanalyzeMsg, setReanalyzeMsg] = useState<string | null>(null);
+
+  // Deletion modal state
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const fetchEntry = async () => {
     setLoading(true);
@@ -75,6 +78,27 @@ export default function EntryDetailPage() {
     }
   };
 
+  const handleDeleteConfirm = async () => {
+    setIsDeleting(true);
+    setDeleteError(null);
+
+    try {
+      const res = await fetch(`/api/entries/${entryId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (data.success) {
+        router.push('/');
+      } else {
+        setDeleteError(data.error || 'Failed to delete entry');
+      }
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Network error deleting entry');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="py-20 text-center text-slate-500">
@@ -97,8 +121,6 @@ export default function EntryDetailPage() {
     );
   }
 
-  const imgUrl = entry.image?.signed_url || `/uploads/${entry.image?.filename}`;
-
   return (
     <div className="space-y-6 pb-12">
       {/* Top Breadcrumb & Controls */}
@@ -120,12 +142,26 @@ export default function EntryDetailPage() {
             <RefreshCw className={`w-3.5 h-3.5 ${reanalyzing ? 'animate-spin' : ''}`} />
             <span>{reanalyzing ? 'Re-analyzing...' : 'Run Analysis Again'}</span>
           </button>
+
+          <button
+            onClick={() => setShowDeleteModal(true)}
+            className="px-3.5 py-2 bg-white border border-rose-200 hover:bg-rose-50 text-rose-700 rounded-lg text-xs font-semibold shadow-sm transition flex items-center gap-1.5"
+          >
+            <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+            <span>Delete Photo</span>
+          </button>
         </div>
       </div>
 
       {reanalyzeMsg && (
         <div className="p-3 bg-blue-50 text-blue-900 border border-blue-200 rounded-lg text-xs font-semibold">
           {reanalyzeMsg}
+        </div>
+      )}
+
+      {deleteError && (
+        <div className="p-3 bg-rose-50 text-rose-900 border border-rose-200 rounded-lg text-xs font-semibold">
+          {deleteError}
         </div>
       )}
 
@@ -334,6 +370,15 @@ export default function EntryDetailPage() {
           )}
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      <DeleteConfirmModal
+        isOpen={showDeleteModal}
+        entry={entry}
+        isDeleting={isDeleting}
+        onConfirm={handleDeleteConfirm}
+        onClose={() => setShowDeleteModal(false)}
+      />
     </div>
   );
 }

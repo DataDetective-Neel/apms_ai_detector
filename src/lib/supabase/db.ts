@@ -291,6 +291,63 @@ export const db = {
     }
   },
 
+  async deleteEntry(id: string): Promise<boolean> {
+    console.log(`[SUPABASE-DB] [DELETE] Operation: deleteEntry | Entry ID: ${id}`);
+    try {
+      // 1. Fetch images for this entry to find files in Storage
+      const { data: images } = await supabaseAdmin
+        .from('images')
+        .select('storage_path_original, storage_path_analysis')
+        .eq('entry_id', id);
+
+      // 2. Remove files from Supabase Storage
+      if (images && images.length > 0) {
+        const pathsToDelete: string[] = [];
+        for (const img of images) {
+          if (img.storage_path_original) pathsToDelete.push(img.storage_path_original);
+          if (img.storage_path_analysis) pathsToDelete.push(img.storage_path_analysis);
+        }
+        if (pathsToDelete.length > 0) {
+          console.log(`[SUPABASE-DB] [STORAGE-DELETE] Deleting ${pathsToDelete.length} file(s) from competition-photos bucket`);
+          const { error: storageErr } = await supabaseAdmin.storage
+            .from('competition-photos')
+            .remove(pathsToDelete);
+          if (storageErr) {
+            console.warn('[SUPABASE-DB] [WARN] Storage delete error:', storageErr);
+          } else {
+            console.log('[SUPABASE-DB] [STORAGE-SUCCESS] Cleaned files from storage bucket');
+          }
+        }
+      }
+
+      // 3. Remove duplicate matches referencing this entry
+      await supabaseAdmin
+        .from('duplicate_matches')
+        .delete()
+        .or(`source_entry_id.eq.${id},matched_entry_id.eq.${id}`);
+
+      // 4. Delete the entry row from PostgreSQL (cascades to images, metadata, reviews, analysis_runs, detector_results)
+      const { error, status } = await supabaseAdmin
+        .from('entries')
+        .delete()
+        .eq('id', id);
+
+      if (error) {
+        console.error(`[SUPABASE-DB] [ERROR] Operation: deleteEntry | HTTP: ${status} | Code: ${error.code} | Message: ${error.message}`);
+        return false;
+      }
+
+      // 5. Audit log
+      await this.logAudit('ENTRY_DELETED', 'entry', id, { deletedAt: new Date().toISOString() }, 'admin');
+
+      console.log(`[SUPABASE-DB] [SUCCESS] Entry ${id} deleted successfully from database and storage.`);
+      return true;
+    } catch (err: any) {
+      console.error(`[SUPABASE-DB] [EXCEPTION] Operation: deleteEntry | Error: ${err?.message}`);
+      return false;
+    }
+  },
+
   async addDuplicateMatch(match: DuplicateMatchRecord): Promise<void> {
     try {
       const { error, status } = await supabaseAdmin.from('duplicate_matches').insert({

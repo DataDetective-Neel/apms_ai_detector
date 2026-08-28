@@ -81,8 +81,8 @@ export default function DashboardPage() {
       {/* Metrics Summary Cards */}
       <DashboardCards stats={stats} />
 
-      {/* Main Table */}
-      <EntryTable entries={entries} />
+      {/* Main Table with onEntryDeleted handler */}
+      <EntryTable entries={entries} onEntryDeleted={fetchEntries} />
     </div>
   );
 }
