@@ -5,6 +5,9 @@ import { Navbar } from '@/components/Navbar';
 export const metadata: Metadata = {
   title: 'APMS AI Detector — Durga Puja Photography Competition',
   description: 'Multi-Model AI Image Authenticity & Photography Competition Management System',
+  icons: {
+    icon: '/images/apms-emblem.jpg',
+  },
 };
 
 export default function RootLayout({
@@ -20,7 +23,13 @@ export default function RootLayout({
           {children}
         </main>
         <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500">
-          <p>© 2026 APMS Durga Puja Photography Competition. Internal Authenticity Screening System.</p>
+          <div className="flex items-center justify-center space-x-2 mb-2">
+            <div className="w-6 h-6 rounded-full overflow-hidden border border-amber-400 p-0.5 bg-white">
+              <img src="/images/apms-emblem.jpg" alt="Logo" className="w-full h-full object-contain" />
+            </div>
+            <span className="font-semibold text-slate-700">APMS Durga Puja Photography Competition 2026</span>
+          </div>
+          <p>© 2026 APMS. Internal AI Authenticity Screening & Competition Management System.</p>
         </footer>
       </body>
     </html>
