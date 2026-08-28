@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { db } from '../supabase/db';
 import { supabaseAdmin } from '../supabase/server';
 import { calculateSha256, calculateDHash, calculateSimilarity } from '../forensic/hashing';
@@ -5,8 +6,6 @@ import { extractMetadata } from '../forensic/exif-extractor';
 import { prepareAnalysisImage } from '../forensic/image-resizer';
 import { runEnsembleAnalysis } from '../detectors';
 import { Entry, ImageRecord, MetadataRecord } from '../types/database';
-import fs from 'fs';
-import path from 'path';
 
 export interface ProcessUploadOptions {
   entryId: string;
@@ -28,16 +27,9 @@ export interface ProcessingResult {
   duplicateAlerts: string[];
 }
 
-// Local storage directory for fallback/instant preview
-const UPLOADS_DIR = path.join(process.cwd(), 'public', 'uploads');
-
 /**
- * Executes full pipeline on an uploaded photograph:
- * 1. Hashes & Deduplication check
- * 2. EXIF & Metadata extraction
- * 3. Pristine storage upload & analysis copy generation
- * 4. 3-Detector Ensemble Inference & Majority Voting
- * 5. Persistent database storage & audit logging
+ * Executes full pipeline on an uploaded photograph with safe server-side logging.
+ * Pure in-memory + Supabase Storage (zero local disk dependency for Vercel compatibility).
  */
 export async function processPhotographUpload(options: ProcessUploadOptions): Promise<ProcessingResult> {
   const {
@@ -53,11 +45,12 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
     fileBuffer,
   } = options;
 
-  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+  console.log(`[UPLOAD-PIPELINE] [START] Entry: ${entryId} | File: ${originalFilename} | Size: ${fileBuffer.length} bytes | Type: ${mimeType}`);
 
   // 1. Calculate Hashes
   const sha256 = calculateSha256(fileBuffer);
   const phash = await calculateDHash(fileBuffer);
+  console.log(`[UPLOAD-PIPELINE] [HASHES] Entry: ${entryId} | SHA256: ${sha256.substring(0, 16)}... | dHash: ${phash}`);
 
   // 2. Check for Duplicates against existing entries
   const existingEntries = await db.getAllEntries();
@@ -66,10 +59,9 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
   for (const existing of existingEntries) {
     if (existing.id === entryId || !existing.image) continue;
 
-    // Exact SHA-256 match
     if (existing.image.sha256 === sha256) {
       await db.addDuplicateMatch({
-        id: `dup-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: crypto.randomUUID(),
         source_entry_id: entryId,
         matched_entry_id: existing.id,
         match_type: 'EXACT_SHA256',
@@ -79,11 +71,10 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
       });
       duplicateAlerts.push(`Exact duplicate detected of entry ${existing.id} (${existing.photo_title}) via SHA-256 hash match.`);
     } else {
-      // Perceptual similarity
       const similarity = calculateSimilarity(phash, existing.image.phash);
       if (similarity >= 85) {
         await db.addDuplicateMatch({
-          id: `dup-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          id: crypto.randomUUID(),
           source_entry_id: entryId,
           matched_entry_id: existing.id,
           match_type: 'PERCEPTUAL_SIMILARITY',
@@ -98,17 +89,15 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
 
   // 3. Extract EXIF & Forensic Metadata
   const rawMeta = await extractMetadata(fileBuffer);
+  console.log(`[UPLOAD-PIPELINE] [EXIF] Entry: ${entryId} | hasExif: ${rawMeta.hasExif} | Camera: ${rawMeta.cameraMake || 'N/A'} ${rawMeta.cameraModel || ''}`);
 
-  // 4. Save Pristine Original & Prepare Resized Analysis Copy
-  const localFileName = `${entryId}_${Date.now()}_${path.basename(originalFilename).replace(/[^a-zA-Z0-9._-]/g, '_')}`;
-  const localFilePath = path.join(UPLOADS_DIR, localFileName);
-  fs.writeFileSync(localFilePath, fileBuffer);
+  // 4. Upload Pristine Original to Supabase Storage
+  const sanitizedFilename = originalFilename.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePathOriginal = `originals/${entryId}/${Date.now()}_${sanitizedFilename}`;
+  let signedUrl = '';
 
-  const storagePathOriginal = `originals/${entryId}/${localFileName}`;
-  let signedUrl = `/uploads/${localFileName}`;
-
-  // Upload original to Supabase private storage if configured
   try {
+    console.log(`[UPLOAD-PIPELINE] [STORAGE-UPLOAD] Operation: upload | Bucket: competition-photos | Path: ${storagePathOriginal}`);
     const { data: uploadData, error: uploadErr } = await supabaseAdmin.storage
       .from('competition-photos')
       .upload(storagePathOriginal, fileBuffer, {
@@ -116,28 +105,38 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
         upsert: true,
       });
 
-    if (!uploadErr) {
-      const { data: signedData } = await supabaseAdmin.storage
+    if (uploadErr) {
+      console.error(`[UPLOAD-PIPELINE] [STORAGE-ERROR] Operation: upload | Code: ${uploadErr.name} | Message: ${uploadErr.message}`);
+    } else {
+      console.log(`[UPLOAD-PIPELINE] [STORAGE-SUCCESS] Operation: upload | Path: ${storagePathOriginal}`);
+      const { data: signedData, error: signErr } = await supabaseAdmin.storage
         .from('competition-photos')
-        .createSignedUrl(storagePathOriginal, 60 * 60 * 24); // 24hr signed URL
+        .createSignedUrl(storagePathOriginal, 60 * 60 * 24 * 7); // 7 days
 
-      if (signedData?.signedUrl) {
+      if (!signErr && signedData?.signedUrl) {
         signedUrl = signedData.signedUrl;
+        console.log(`[UPLOAD-PIPELINE] [STORAGE-SIGNED-URL] Operation: createSignedUrl | Status: SUCCESS`);
       }
     }
-  } catch (err) {
-    console.warn('Supabase storage upload fallback to local storage:', err);
+  } catch (err: any) {
+    console.error(`[UPLOAD-PIPELINE] [STORAGE-EXCEPTION] ${err?.message || 'Storage error'}`);
   }
 
-  // Generate clamped 768px analysis copy
+  // 5. Generate In-Memory Clamped 768px Analysis Copy & Run Ensemble Inference
+  console.log(`[UPLOAD-PIPELINE] [ANALYSIS-IMAGE] Preparing 768px in-memory buffer...`);
   const imgAnalysisInfo = await prepareAnalysisImage(fileBuffer);
+  console.log(`[UPLOAD-PIPELINE] [ANALYSIS-IMAGE] Dimensions: ${imgAnalysisInfo.analysisWidth}x${imgAnalysisInfo.analysisHeight} px | Size: ${imgAnalysisInfo.analysisBuffer.length} bytes`);
 
-  // 5. Run 3-Detector Ensemble Inference & Majority Voting
+  console.log(`[UPLOAD-PIPELINE] [INFERENCE-ENSEMBLE] Calling 3-model screening ensemble...`);
   const decision = await runEnsembleAnalysis(imgAnalysisInfo.analysisBuffer);
+  console.log(`[UPLOAD-PIPELINE] [INFERENCE-RESULT] Overall: ${decision.overallResult} | AI Votes: ${decision.aiVotes}/3 | Real Votes: ${decision.realVotes}/3 | Inconclusive: ${decision.inconclusiveVotes}`);
 
-  // 6. Build Records
+  // 6. Build Valid UUID Records
+  const imageId = crypto.randomUUID();
+  const metadataId = crypto.randomUUID();
+
   const imageRecord: ImageRecord = {
-    id: `img-${entryId}-${Date.now()}`,
+    id: imageId,
     entry_id: entryId,
     storage_path_original: storagePathOriginal,
     storage_path_analysis: `analysis/${entryId}.jpg`,
@@ -148,13 +147,13 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
     height: imgAnalysisInfo.originalHeight,
     sha256,
     phash,
-    signed_url: signedUrl,
+    signed_url: signedUrl || undefined,
     created_at: new Date().toISOString(),
   };
 
   const metadataRecord: MetadataRecord = {
-    id: `meta-${entryId}-${Date.now()}`,
-    image_id: imageRecord.id,
+    id: metadataId,
+    image_id: imageId,
     camera_make: rawMeta.cameraMake,
     camera_model: rawMeta.cameraModel,
     lens_model: rawMeta.lensModel,
@@ -195,10 +194,11 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
     detector_results: decision.detectorResults,
   };
 
-  // 7. Persist to Database
+  // 7. Persist Records to Supabase PostgreSQL
+  console.log(`[UPLOAD-PIPELINE] [DB-INSERT] Saving entry ${entryId} to Supabase...`);
+  await db.saveEntry(entryRecord);
   await db.saveImage(imageRecord);
   await db.saveMetadata(metadataRecord, entryId);
-  await db.saveEntry(entryRecord);
 
   // 8. Log Audit Record
   await db.logAudit(
@@ -214,6 +214,8 @@ export async function processPhotographUpload(options: ProcessUploadOptions): Pr
     },
     'system'
   );
+
+  console.log(`[UPLOAD-PIPELINE] [COMPLETE] Successfully processed entry ${entryId}`);
 
   return {
     entry: entryRecord,
