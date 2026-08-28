@@ -2,6 +2,14 @@ import crypto from 'crypto';
 import { Entry, ImageRecord, MetadataRecord, DuplicateMatchRecord, ReviewRecord, AuditLogRecord } from '../types/database';
 import { supabaseAdmin } from './server';
 
+function formatSignedUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://lhspnxlyshdouaubemmm.supabase.co';
+  const prefix = url.startsWith('/storage/v1') ? '' : '/storage/v1';
+  return `${baseUrl.replace(/\/$/, '')}${prefix}${url.startsWith('/') ? '' : '/'}${url}`;
+}
+
 export const db = {
   async getAllEntries(): Promise<Entry[]> {
     console.log('[SUPABASE-DB] [SELECT] Operation: getAllEntries');
@@ -34,6 +42,29 @@ export const db = {
 
       if (imgErr) console.warn(`[SUPABASE-DB] [WARN] Operation: select images | Code: ${imgErr.code} | Message: ${imgErr.message}`);
       if (metaErr) console.warn(`[SUPABASE-DB] [WARN] Operation: select metadata | Code: ${metaErr.code} | Message: ${metaErr.message}`);
+
+      // Generate 24-hour signed URLs for all images
+      if (images && images.length > 0) {
+        const imagePaths = images.map((img: any) => img.storage_path_original).filter(Boolean);
+        if (imagePaths.length > 0) {
+          try {
+            const { data: signedUrls, error: signErr } = await supabaseAdmin.storage
+              .from('competition-photos')
+              .createSignedUrls(imagePaths, 60 * 60 * 24); // 24-hour expiry
+
+            if (!signErr && Array.isArray(signedUrls)) {
+              const signedMap = new Map(signedUrls.map((s: any) => [s.path, s.signedUrl]));
+              for (const img of images) {
+                if (img.storage_path_original && signedMap.has(img.storage_path_original)) {
+                  img.signed_url = formatSignedUrl(signedMap.get(img.storage_path_original));
+                }
+              }
+            }
+          } catch (signEx) {
+            console.warn('[SUPABASE-DB] Error generating batch signed URLs:', signEx);
+          }
+        }
+      }
 
       const imageMap = new Map((images || []).map((img: any) => [img.entry_id, img]));
       const metaMap = new Map((metaList || []).map((m: any) => [m.image_id, m]));
@@ -83,6 +114,21 @@ export const db = {
         supabaseAdmin.from('reviews').select('*').eq('entry_id', id).order('created_at', { ascending: false }),
         supabaseAdmin.from('duplicate_matches').select('*'),
       ]);
+
+      // Generate 24-hour signed URL for entry preview
+      if (img?.storage_path_original) {
+        try {
+          const { data: signData, error: signErr } = await supabaseAdmin.storage
+            .from('competition-photos')
+            .createSignedUrl(img.storage_path_original, 60 * 60 * 24); // 24-hour expiry
+
+          if (!signErr && signData?.signedUrl) {
+            img.signed_url = formatSignedUrl(signData.signedUrl);
+          }
+        } catch (signEx) {
+          console.warn(`[SUPABASE-DB] Single signed URL error for entry ${id}:`, signEx);
+        }
+      }
 
       let meta = null;
       if (img?.id) {
