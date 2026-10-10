@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Upload, CheckCircle2, AlertCircle, RefreshCw, FileText } from 'lucide-react';
+import { readUploadResponse } from '@/lib/upload-response';
 
 export function BatchUploader() {
   const router = useRouter();
@@ -24,28 +25,42 @@ export function BatchUploader() {
     if (files.length === 0) return;
 
     setIsUploading(true);
+    setUploadResult(null);
     setProgressText(`Uploading & analyzing ${files.length} photograph(s)...`);
 
     try {
-      const formData = new FormData();
-      files.forEach((f) => formData.append('files', f));
-      formData.append('participantName', participantName);
-      formData.append('category', category);
+      let processedCount = 0;
+      const errors: { filename: string; error: string }[] = [];
+      // Keep batch size from exceeding the proxy's request limit.
+      for (let index = 0; index < files.length; index++) {
+        const file = files[index];
+        setProgressText(`Uploading & analyzing photograph ${index + 1} of ${files.length}: ${file.name}`);
+        const formData = new FormData();
+        formData.append('files', file);
+        formData.append('participantName', participantName);
+        formData.append('category', category);
 
-      const res = await fetch('/api/batch-upload', {
-        method: 'POST',
-        body: formData,
-      });
-
-      const data = await res.json();
-      setUploadResult(data);
-      if (data.success) {
-        setProgressText(`Successfully processed ${data.processedCount} photographs!`);
+        const res = await fetch('/api/batch-upload', {
+          method: 'POST',
+          body: formData,
+        });
+        let data;
+        try {
+          data = await readUploadResponse(res);
+        } catch (error: any) {
+          throw new Error(`${file.name}: ${error.message} ${processedCount} photograph(s) already processed.`);
+        }
+        processedCount += data.processedCount;
+        errors.push(...data.errors);
+      }
+      setUploadResult({ processedCount, errors });
+      if (errors.length === 0) {
+        setProgressText(`Successfully processed ${processedCount} photographs!`);
         setTimeout(() => {
           router.push('/');
         }, 1500);
       } else {
-        setProgressText(`Error: ${data.error}`);
+        setProgressText(`Processed ${processedCount} photographs; ${errors.length} failed. ${errors.map((item) => `${item.filename}: ${item.error}`).join('; ')}`);
       }
     } catch (err: any) {
       setProgressText(`Upload failed: ${err?.message || 'Network error'}`);
