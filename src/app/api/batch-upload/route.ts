@@ -1,15 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { processPhotographUpload } from '@/lib/queue/job-queue';
 import { db } from '@/lib/supabase/db';
+import { supabaseAdmin } from '@/lib/supabase/server';
+import { verifyUploadTicket } from '@/lib/upload-ticket';
 
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: NextRequest) {
+  let pendingPath: string | undefined;
   try {
-    const formData = await req.formData();
-    const files = formData.getAll('files') as File[];
-    const category = (formData.get('category') as string) || 'General';
-    const defaultParticipant = (formData.get('participantName') as string) || 'Competition Participant';
+    let files: File[];
+    let category: string;
+    let defaultParticipant: string;
+    if (req.headers.get('content-type')?.includes('application/json')) {
+      const body = await req.json();
+      const ticket = verifyUploadTicket(body.ticket);
+      pendingPath = ticket.path;
+      const { data, error } = await supabaseAdmin.storage.from('competition-photos').download(ticket.path);
+      if (error || !data) throw new Error(error?.message || 'Uploaded photograph not found');
+      if (data.size !== ticket.size) throw new Error('Uploaded photograph size does not match');
+      files = [new File([data], ticket.name, { type: ticket.type })];
+      category = body.category || 'General';
+      defaultParticipant = body.participantName || 'Competition Participant';
+    } else {
+      const formData = await req.formData();
+      files = formData.getAll('files') as File[];
+      category = (formData.get('category') as string) || 'General';
+      defaultParticipant = (formData.get('participantName') as string) || 'Competition Participant';
+    }
 
     console.log(`[API-BATCH-UPLOAD] Request received with ${files.length} file(s) | Category: ${category}`);
 
@@ -65,5 +83,10 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error('[API-BATCH-UPLOAD] [FATAL-ERROR]:', error?.message || error);
     return NextResponse.json({ success: false, error: error?.message || 'Batch upload failed' }, { status: 500 });
+  } finally {
+    if (pendingPath) {
+      const { error } = await supabaseAdmin.storage.from('competition-photos').remove([pendingPath]);
+      if (error) console.error('[API-BATCH-UPLOAD] Could not remove temporary upload:', error.message);
+    }
   }
 }

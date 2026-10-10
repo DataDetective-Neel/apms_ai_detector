@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Upload, CheckCircle2, AlertCircle, RefreshCw, FileText } from 'lucide-react';
 import { readUploadResponse } from '@/lib/upload-response';
+import { supabaseClient } from '@/lib/supabase/client';
 
 export function BatchUploader() {
   const router = useRouter();
@@ -31,21 +32,24 @@ export function BatchUploader() {
     try {
       let processedCount = 0;
       const errors: { filename: string; error: string }[] = [];
-      // Keep batch size from exceeding the proxy's request limit.
       for (let index = 0; index < files.length; index++) {
         const file = files[index];
         setProgressText(`Uploading & analyzing photograph ${index + 1} of ${files.length}: ${file.name}`);
-        const formData = new FormData();
-        formData.append('files', file);
-        formData.append('participantName', participantName);
-        formData.append('category', category);
-
-        const res = await fetch('/api/batch-upload', {
-          method: 'POST',
-          body: formData,
-        });
         let data;
         try {
+          const upload = await readUploadResponse(await fetch('/api/upload-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: file.name, type: file.type, size: file.size }),
+          }));
+          const { error } = await supabaseClient.storage.from('competition-photos')
+            .uploadToSignedUrl(upload.path, upload.token, file, { contentType: file.type });
+          if (error) throw new Error(error.message);
+          const res = await fetch('/api/batch-upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticket: upload.ticket, participantName, category }),
+          });
           data = await readUploadResponse(res);
         } catch (error: any) {
           throw new Error(`${file.name}: ${error.message} ${processedCount} photograph(s) already processed.`);
